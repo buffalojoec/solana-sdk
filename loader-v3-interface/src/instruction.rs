@@ -61,16 +61,40 @@ impl<'a> WritePayload<'a> {
 
 pub struct DeployWithMaxDataLenPayload {
     pub max_data_len: u64,
+    pub close_buffer: bool,
 }
 
 impl DeployWithMaxDataLenPayload {
     pub fn read(data: &[u8]) -> Result<Self, InstructionError> {
-        let max_data_len = instr_rdr().read_u64(data)?;
-        Ok(Self { max_data_len })
+        let mut rdr = instr_rdr();
+        let max_data_len = rdr.read_u64(data)?;
+        let close_buffer = rdr.read_u8(data).map(|b| b != 0).unwrap_or(true);
+        Ok(Self {
+            max_data_len,
+            close_buffer,
+        })
     }
 
-    pub const fn pack(self) -> [u8; 8] {
-        self.max_data_len.to_le_bytes()
+    pub fn pack(self) -> [u8; 9] {
+        let mut out = [0u8; 9];
+        out[..8].copy_from_slice(&self.max_data_len.to_le_bytes());
+        out[8] = self.close_buffer as u8;
+        out
+    }
+}
+
+pub struct UpgradePayload {
+    pub close_buffer: bool,
+}
+
+impl UpgradePayload {
+    pub fn read(data: &[u8]) -> Result<Self, InstructionError> {
+        let close_buffer = instr_rdr().read_u8(data).map(|b| b != 0).unwrap_or(true);
+        Ok(Self { close_buffer })
+    }
+
+    pub const fn pack(self) -> [u8; 1] {
+        [self.close_buffer as u8]
     }
 }
 
