@@ -1,111 +1,133 @@
-use solana_pubkey::Pubkey;
+use {crate::reader::acct_rdr, solana_instruction_error::InstructionError, solana_pubkey::Pubkey};
 
-/// Upgradeable loader account states
-#[cfg_attr(feature = "frozen-abi", derive(solana_frozen_abi_macro::AbiExample))]
-#[cfg_attr(
-    feature = "serde",
-    derive(serde_derive::Deserialize, serde_derive::Serialize)
-)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum UpgradeableLoaderState {
-    /// Account is not initialized.
     Uninitialized,
-    /// A Buffer account.
-    Buffer {
-        /// Authority address
-        authority_address: Option<Pubkey>,
-        // The raw program data follows this serialized structure in the
-        // account's data.
-    },
-    /// An Program account.
-    Program {
-        /// Address of the ProgramData account.
-        programdata_address: Pubkey,
-    },
-    // A ProgramData account.
-    ProgramData {
-        /// Slot that the program was last modified.
-        slot: u64,
-        /// Address of the Program's upgrade authority.
-        upgrade_authority_address: Option<Pubkey>,
-        // The raw program data follows this serialized structure in the
-        // account's data.
-    },
+    Buffer,
+    Program,
+    ProgramData,
 }
+
 impl UpgradeableLoaderState {
-    /// Size of a serialized program account.
-    pub const fn size_of_uninitialized() -> usize {
-        4 // see test_state_size_of_uninitialized
+    pub const fn read(data: &[u8]) -> Result<&Self, InstructionError> {
+        match data.first() {
+            Some(0) => Ok(&Self::Uninitialized),
+            Some(1) => Ok(&Self::Buffer),
+            Some(2) => Ok(&Self::Program),
+            Some(3) => Ok(&Self::ProgramData),
+            _ => Err(InstructionError::InvalidAccountData),
+        }
     }
 
-    /// Size of a buffer account's serialized metadata.
-    pub const fn size_of_buffer_metadata() -> usize {
-        37 // see test_state_size_of_buffer_metadata
-    }
-
-    /// Size of a programdata account's serialized metadata.
-    pub const fn size_of_programdata_metadata() -> usize {
-        45 // see test_state_size_of_programdata_metadata
-    }
-
-    /// Size of a serialized program account.
-    pub const fn size_of_program() -> usize {
-        36 // see test_state_size_of_program
-    }
-
-    /// Size of a serialized buffer account.
-    pub const fn size_of_buffer(program_len: usize) -> usize {
-        Self::size_of_buffer_metadata().saturating_add(program_len)
-    }
-
-    /// Size of a serialized programdata account.
-    pub const fn size_of_programdata(program_len: usize) -> usize {
-        Self::size_of_programdata_metadata().saturating_add(program_len)
+    pub const fn pack(self) -> [u8; 4] {
+        (self as u32).to_le_bytes()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use {super::*, bincode::serialized_size};
+pub struct Buffer<'a> {
+    pub authority_address: Option<Pubkey>,
+    pub data: &'a [u8],
+}
 
-    #[test]
-    fn test_state_size_of_uninitialized() {
-        let buffer_state = UpgradeableLoaderState::Uninitialized;
-        let size = serialized_size(&buffer_state).unwrap();
-        assert_eq!(UpgradeableLoaderState::size_of_uninitialized() as u64, size);
+impl<'a> Buffer<'a> {
+    const DISCRIMINATOR: u8 = 1;
+    pub const METADATA_LEN: usize = 37;
+
+    pub const fn new(authority_address: Option<Pubkey>, data: &'a [u8]) -> Self {
+        Self {
+            authority_address,
+            data,
+        }
     }
 
-    #[test]
-    fn test_state_size_of_buffer_metadata() {
-        let buffer_state = UpgradeableLoaderState::Buffer {
-            authority_address: Some(Pubkey::default()),
-        };
-        let size = serialized_size(&buffer_state).unwrap();
-        assert_eq!(
-            UpgradeableLoaderState::size_of_buffer_metadata() as u64,
-            size
+    pub fn read(data: &'a [u8]) -> Result<Self, InstructionError> {
+        let mut rdr = acct_rdr();
+        rdr.read_discriminator_checked(data, Self::DISCRIMINATOR)?;
+        let authority_address = rdr.read_option_pubkey(data)?;
+        let data = rdr.read_slice(data)?;
+        Ok(Self::new(authority_address, data))
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut out = vec![0u8; Self::METADATA_LEN + self.data.len()];
+        out[0] = Self::DISCRIMINATOR;
+        pack_option_pubkey(&self.authority_address, &mut out[4..Self::METADATA_LEN]);
+        out[Self::METADATA_LEN..].copy_from_slice(self.data);
+        out
+    }
+}
+
+pub struct Program {
+    pub programdata_address: Pubkey,
+}
+
+impl Program {
+    const DISCRIMINATOR: u8 = 2;
+    pub const METADATA_LEN: usize = 36;
+
+    pub const fn new(programdata_address: Pubkey) -> Self {
+        Self {
+            programdata_address,
+        }
+    }
+
+    pub fn read(data: &[u8]) -> Result<Self, InstructionError> {
+        let mut rdr = acct_rdr();
+        rdr.read_discriminator_checked(data, Self::DISCRIMINATOR)?;
+        let programdata_address = rdr.read_pubkey(data)?;
+        Ok(Self::new(programdata_address))
+    }
+
+    pub fn pack(&self) -> [u8; Self::METADATA_LEN] {
+        let mut out = [0u8; Self::METADATA_LEN];
+        out[0] = Self::DISCRIMINATOR;
+        out[4..].copy_from_slice(self.programdata_address.as_array());
+        out
+    }
+}
+
+pub struct ProgramData<'a> {
+    pub slot: u64,
+    pub upgrade_authority_address: Option<Pubkey>,
+    pub data: &'a [u8],
+}
+
+impl<'a> ProgramData<'a> {
+    const DISCRIMINATOR: u8 = 3;
+    pub const METADATA_LEN: usize = 45;
+
+    pub const fn new(slot: u64, upgrade_authority_address: Option<Pubkey>, data: &'a [u8]) -> Self {
+        Self {
+            slot,
+            upgrade_authority_address,
+            data,
+        }
+    }
+
+    pub fn read(data: &'a [u8]) -> Result<Self, InstructionError> {
+        let mut rdr = acct_rdr();
+        rdr.read_discriminator_checked(data, Self::DISCRIMINATOR)?;
+        let slot = rdr.read_u64(data)?;
+        let upgrade_authority_address = rdr.read_option_pubkey(data)?;
+        let data = rdr.read_slice(data)?;
+        Ok(Self::new(slot, upgrade_authority_address, data))
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        let mut out = vec![0u8; Self::METADATA_LEN + self.data.len()];
+        out[0] = Self::DISCRIMINATOR;
+        out[4..12].copy_from_slice(&self.slot.to_le_bytes());
+        pack_option_pubkey(
+            &self.upgrade_authority_address,
+            &mut out[12..Self::METADATA_LEN],
         );
+        out[Self::METADATA_LEN..].copy_from_slice(self.data);
+        out
     }
+}
 
-    #[test]
-    fn test_state_size_of_programdata_metadata() {
-        let programdata_state = UpgradeableLoaderState::ProgramData {
-            upgrade_authority_address: Some(Pubkey::default()),
-            slot: 0,
-        };
-        let size = serialized_size(&programdata_state).unwrap();
-        assert_eq!(
-            UpgradeableLoaderState::size_of_programdata_metadata() as u64,
-            size
-        );
-    }
-
-    #[test]
-    fn test_state_size_of_program() {
-        let program_state = UpgradeableLoaderState::Program {
-            programdata_address: Pubkey::default(),
-        };
-        let size = serialized_size(&program_state).unwrap();
-        assert_eq!(UpgradeableLoaderState::size_of_program() as u64, size);
+fn pack_option_pubkey(authority: &Option<Pubkey>, out: &mut [u8]) {
+    if let Some(pubkey) = authority {
+        out[0] = 1;
+        out[1..33].copy_from_slice(pubkey.as_array());
     }
 }
